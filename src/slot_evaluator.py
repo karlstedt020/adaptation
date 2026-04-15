@@ -1,5 +1,6 @@
 """Joint intent classification & slot filling evaluation on SNIPS."""
 
+import gc
 import logging
 import json
 from collections import defaultdict
@@ -238,7 +239,15 @@ def run_slot_evaluation(
                 "run": run_i,
                 **metrics,
             })
-            # free GPU memory
-            del model
-            torch.cuda.empty_cache()
+            # free GPU memory after each run
+            try:
+                model.to("cpu")
+            except Exception:
+                pass
+            del model, tok, i2id, t2id
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            logger.info("Freed memory after %s run %d", mname, run_i)
     return pd.DataFrame(records)

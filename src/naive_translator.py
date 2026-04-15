@@ -11,11 +11,13 @@ logger = logging.getLogger(__name__)
 
 def translate_text(text: str, src: str = "en", dest: str = "ru") -> str:
     """Translate a single string via Google Translate."""
+    if not text or not str(text).strip():
+        return ""
     try:
-        return GoogleTranslator(source=src, target=dest).translate(text)
+        return GoogleTranslator(source=src, target=dest).translate(str(text))
     except Exception as exc:
-        logger.warning("Translation failed for '%s…': %s", text[:40], exc)
-        return text
+        logger.warning("Translation failed for '%s…': %s", str(text)[:40], exc)
+        return ""
 
 
 def translate_batch(
@@ -30,21 +32,34 @@ def translate_batch(
     return results
 
 
-def translate_crows_pairs(df: pd.DataFrame) -> pd.DataFrame:
-    """Naive-translate CrowS-Pairs; adds *_ru columns."""
-    out = df.copy()
-    logger.info("Naive-translating %d CrowS-Pairs …", len(df))
-    out["sent_more_ru"] = translate_batch(df["sent_more"].tolist())
-    out["sent_less_ru"] = translate_batch(df["sent_less"].tolist())
+def _slice(df: pd.DataFrame, limit: int | None) -> pd.DataFrame:
+    """Return df or df.head(limit) if limit is set."""
+    return df.head(limit).copy() if limit is not None else df.copy()
+
+
+def translate_crows_pairs(
+    df: pd.DataFrame, limit: int | None = None
+) -> pd.DataFrame:
+    """Naive-translate CrowS-Pairs; adds *_ru columns.
+
+    Args:
+        limit: if set, only the first *limit* rows are processed (for smoke tests).
+    """
+    out = _slice(df, limit)
+    logger.info("Naive-translating %d CrowS-Pairs …", len(out))
+    out["sent_more_ru"] = translate_batch(out["sent_more"].tolist())
+    out["sent_less_ru"] = translate_batch(out["sent_less"].tolist())
     return out
 
 
-def translate_snips(df: pd.DataFrame) -> pd.DataFrame:
+def translate_snips(
+    df: pd.DataFrame, limit: int | None = None
+) -> pd.DataFrame:
     """Naive-translate SNIPS utterances; adds text_ru column.
 
     Slot boundaries are NOT adapted — only raw text is translated.
     """
-    out = df.copy()
-    logger.info("Naive-translating %d SNIPS utterances …", len(df))
-    out["text_ru"] = translate_batch(df["text"].tolist())
+    out = _slice(df, limit)
+    logger.info("Naive-translating %d SNIPS utterances …", len(out))
+    out["text_ru"] = translate_batch(out["text"].tolist())
     return out

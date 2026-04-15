@@ -35,8 +35,9 @@ class PathConfig:
 class OpenRouterConfig:
     """OpenRouter API settings — user fills in key and model."""
     base_url: str = "https://openrouter.ai/api/v1"
-    api_key: str = ""       # <-- SET YOUR KEY
-    model: str = ""         # <-- SET YOUR MODEL (e.g. "anthropic/claude-sonnet-4")
+    api_key: str = ""                                   # <-- SET YOUR KEY
+    model: str = "deepseek/deepseek-chat-v3.1"          # main translation/adaptation model (cheap)
+    ner_model: str = "google/gemini-2.0-flash-001"      # NER model (very cheap, good JSON following)
     max_retries: int = 3
     timeout: int = 120
     temperature: float = 0.7
@@ -46,10 +47,13 @@ class OpenRouterConfig:
 @dataclass
 class EvalConfig:
     """Models used for evaluation."""
+    # Each entry: (hf_model_name, model_type) where model_type is "mlm" or "causal".
+    # All entries below fit in a 15 GB VRAM Colab GPU in fp16.
     bias_models: list = field(default_factory=lambda: [
-        "DeepPavlov/rubert-base-cased",
-        "bert-base-multilingual-cased",
-        "xlm-roberta-base",
+        ("DeepPavlov/rubert-base-cased",            "mlm"),
+        ("bert-base-multilingual-cased",            "mlm"),
+        ("xlm-roberta-base",                        "mlm"),
+        ("RefalMachine/RuadaptQwen2.5-3B-Instruct", "causal"),  # ≈ 6 GB in fp16
     ])
     slot_models: list = field(default_factory=lambda: [
         "DeepPavlov/rubert-base-cased",
@@ -66,4 +70,3 @@ class PipelineConfig:
     paths: PathConfig = field(default_factory=PathConfig)
     openrouter: OpenRouterConfig = field(default_factory=OpenRouterConfig)
     evaluation: EvalConfig = field(default_factory=EvalConfig)
-    spacy_model: str = "en_core_web_sm"

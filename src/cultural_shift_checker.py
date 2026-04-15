@@ -11,6 +11,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from .llm_client import LLMClient
+from .json_utils import parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +38,7 @@ Rate the cultural shift quality (1-5).
 
 
 def _parse_json(response: str) -> dict:
-    text = response.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
-    return json.loads(text)
+    return parse_json_response(response)
 
 
 def check_cultural_shift(

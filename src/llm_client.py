@@ -15,17 +15,18 @@ logger = logging.getLogger(__name__)
 class LLMClient:
     """Thin wrapper around OpenRouter via the OpenAI SDK."""
 
-    def __init__(self, cfg: OpenRouterConfig):
+    def __init__(self, cfg: OpenRouterConfig, model_override: str = ""):
         if not cfg.api_key:
             raise ValueError("OpenRouter API key is not set in config.")
-        if not cfg.model:
+        model = model_override or cfg.model
+        if not model:
             raise ValueError("OpenRouter model is not set in config.")
         self._client = OpenAI(
             base_url=cfg.base_url,
             api_key=cfg.api_key,
             timeout=cfg.timeout,
         )
-        self._model = cfg.model
+        self._model = model
         self._max_retries = cfg.max_retries
 
     def complete(
