@@ -1,11 +1,12 @@
 """Rate-limited parallel execution for LLM and translation API calls."""
 
 import logging
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,6 @@ class RateLimiter:
                 if now >= self._next_allowed:
                     self._next_allowed = now + self._interval
                     return
-                # Reserve the next slot for this thread
                 wake_at = self._next_allowed
                 self._next_allowed += self._interval
             time.sleep(max(0.0, wake_at - time.monotonic()))
@@ -46,41 +46,57 @@ def parallel_apply(
     rps: float = 4.0,
     desc: str = "",
 ) -> list:
-    """Apply *func* to each item in parallel with a shared RPS budget.
+    """Apply *func* to each item with a shared RPS budget.
 
-    Results are returned in the **same order** as *items*.
-    Failed items produce ``None`` and emit a warning (they do not abort
-    the remaining work).
+    Results are returned in the same order as *items*.
+    Failures yield ``None`` and a warning — they do not abort the rest.
 
-    Args:
-        func:        callable(item) → result
-        items:       list of inputs
-        max_workers: thread-pool size
-        rps:         maximum requests per second across all threads
-        desc:        tqdm progress-bar label
+    ``max_workers <= 1`` runs sequentially (no ThreadPoolExecutor) — useful
+    for diagnostics in Jupyter/Kaggle, where widget bars may mis-render.
     """
     if not items:
         return []
 
     limiter = RateLimiter(rps)
     results: list = [None] * len(items)
+    bar = tqdm(
+        total=len(items),
+        desc=desc or "processing",
+        file=sys.stderr,
+        mininterval=0.3,
+        dynamic_ncols=True,
+    )
 
-    def _bounded(idx: int):
+    def _run(idx: int):
         limiter.acquire()
-        return idx, func(items[idx])
+        try:
+            return func(items[idx])
+        except Exception as exc:
+            logger.warning("parallel_apply: item %d failed: %s", idx, exc)
+            return None
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_bounded, i): i for i in range(len(items))}
-        with tqdm(total=len(items), desc=desc or "processing") as bar:
-            for fut in as_completed(futures):
+    try:
+        if max_workers <= 1:
+            for i in range(len(items)):
+                results[i] = _run(i)
                 bar.update(1)
-                if fut.exception() is not None:
-                    logger.warning(
-                        "parallel_apply: item %d failed: %s",
-                        futures[fut], fut.exception(),
-                    )
-                else:
-                    idx, val = fut.result()
-                    results[idx] = val
+            return results
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_run, i): i for i in range(len(items))}
+            done = 0
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                try:
+                    results[idx] = fut.result()
+                except Exception as exc:
+                    logger.warning("parallel_apply: item %d raised: %s", idx, exc)
+                done += 1
+                bar.update(1)
+                if done % 50 == 0:
+                    logger.info("%s: %d/%d done", desc or "parallel_apply",
+                                done, len(items))
+    finally:
+        bar.close()
 
     return results

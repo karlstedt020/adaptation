@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 @dataclass
 class PathConfig:
     """All project paths."""
-    root: Path = Path("D:/adaptation")
+    root: Path = Path(".")
 
     @property
     def data_raw(self) -> Path:
@@ -39,7 +39,7 @@ class OpenRouterConfig:
     model: str = "deepseek/deepseek-chat-v3.1"          # main translation/adaptation model
     ner_model: str = "google/gemini-2.0-flash-001"      # NER model (cheap, great at JSON)
     max_retries: int = 3
-    timeout: int = 120
+    timeout: int = 60
     n_variants: int = 3          # adaptation variants per example
 
     # ── Concurrency ──────────────────────────────────────────
