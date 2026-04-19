@@ -27,16 +27,18 @@ class RateLimiter:
         self._next_allowed = time.monotonic()
 
     def acquire(self) -> None:
-        """Block the calling thread until it may proceed."""
-        while True:
-            with self._lock:
-                now = time.monotonic()
-                if now >= self._next_allowed:
-                    self._next_allowed = now + self._interval
-                    return
-                wake_at = self._next_allowed
-                self._next_allowed += self._interval
-            time.sleep(max(0.0, wake_at - time.monotonic()))
+        """Block the calling thread until it may proceed.
+
+        Each caller reserves the next free time slot atomically under the
+        lock, then sleeps at most once until that slot arrives.
+        """
+        with self._lock:
+            now = time.monotonic()
+            wake_at = max(now, self._next_allowed)
+            self._next_allowed = wake_at + self._interval
+        delay = wake_at - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
 
 
 def parallel_apply(
@@ -56,6 +58,10 @@ def parallel_apply(
     """
     if not items:
         return []
+
+    print(f"[parallel_apply] start: {desc or 'processing'} "
+          f"n={len(items)} workers={max_workers} rps={rps}",
+          file=sys.stderr, flush=True)
 
     limiter = RateLimiter(rps)
     results: list = [None] * len(items)
@@ -84,6 +90,8 @@ def parallel_apply(
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {pool.submit(_run, i): i for i in range(len(items))}
+            print(f"[parallel_apply] submitted {len(futures)} futures",
+                  file=sys.stderr, flush=True)
             done = 0
             for fut in as_completed(futures):
                 idx = futures[fut]
@@ -93,9 +101,9 @@ def parallel_apply(
                     logger.warning("parallel_apply: item %d raised: %s", idx, exc)
                 done += 1
                 bar.update(1)
-                if done % 50 == 0:
-                    logger.info("%s: %d/%d done", desc or "parallel_apply",
-                                done, len(items))
+                if done <= 5 or done % 50 == 0:
+                    print(f"[parallel_apply] {desc}: {done}/{len(items)}",
+                          file=sys.stderr, flush=True)
     finally:
         bar.close()
 
