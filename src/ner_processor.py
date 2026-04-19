@@ -3,49 +3,36 @@
 Extracts entities following the Nevéol et al. (ACL 2022) typology for
 cultural adaptation: names, locations, food, sports, institutions,
 holidays/events, brands, nationalities, works of art, etc.
+
+Results are cached at the LLMClient level (temperature=0 → deterministic).
+Entity dicts (via ``entity_to_dict`` / ``entities_from_dicts``) are stored
+in DataFrames so the pipeline never repeats the same API call.
 """
 
-import json
 import logging
-from dataclasses import dataclass
-from functools import lru_cache
+from dataclasses import dataclass, asdict
 
 from .llm_client import LLMClient
 from .json_utils import parse_json_response
 
 logger = logging.getLogger(__name__)
 
-# Adaptation categories from Nevéol et al. (ACL 2022)
 ADAPTATION_TYPES = {
-    "PERSON":      "name",                  # first/last names, fictional characters
-    "LOCATION":    "country_or_city",       # countries, cities, regions
-    "FOOD":        "food_or_drink",         # national dishes, drinks
-    "SPORT":       "sport",                 # sports & teams
-    "ORG":         "institution_or_brand",  # companies, schools, agencies
-    "NORP":        "nationality_or_group",  # nationalities, ethnic & religious groups
-    "HOLIDAY":     "holiday_or_event",      # holidays, national events
-    "WORK_OF_ART": "creative_work",         # movies, books, songs
-    "LAW":         "legal_reference",       # laws, legal concepts
-    "CURRENCY":    "currency",              # currencies
-    "MEASUREMENT": "measurement",           # culturally-bound measurements (miles, lbs)
+    "PERSON":      "name",
+    "LOCATION":    "country_or_city",
+    "FOOD":        "food_or_drink",
+    "SPORT":       "sport",
+    "ORG":         "institution_or_brand",
+    "NORP":        "nationality_or_group",
+    "HOLIDAY":     "holiday_or_event",
+    "WORK_OF_ART": "creative_work",
+    "LAW":         "legal_reference",
+    "CURRENCY":    "currency",
+    "MEASUREMENT": "measurement",
     "OTHER":       "other",
 }
 
-# Types that are considered culturally-specific
 CULTURAL_TYPES = set(ADAPTATION_TYPES.keys()) - {"OTHER"}
-
-
-@dataclass
-class Entity:
-    """Culturally-specific named entity."""
-    text: str
-    label: str               # one of ADAPTATION_TYPES keys
-    start: int               # char offset in the input sentence
-    end: int
-    adaptation_type: str     # human-readable category
-
-
-# ── Prompt templates ────────────────────────────────────────
 
 NER_SYSTEM_PROMPT = """\
 You are a precise named-entity recognition system for cultural adaptation \
@@ -70,8 +57,7 @@ RULES:
 1. Extract ONLY entities that might need replacement when adapting to another culture.
 2. Return exact surface form as it appears in the text (case-sensitive).
 3. Provide character offsets (0-indexed, end-exclusive) matching the exact substring.
-4. If an entity could belong to several categories, pick the most specific one \
-(e.g. "Thanksgiving dinner" → HOLIDAY, not FOOD).
+4. If an entity belongs to several categories, pick the most specific one.
 5. Do NOT extract pronouns, common nouns, or generic adjectives.
 6. Return ONLY valid JSON, no commentary."""
 
@@ -86,97 +72,96 @@ Return JSON in this exact format:
 If no culturally-specific entities are present, return: {{"entities": []}}"""
 
 
-# ── JSON parsing helper ─────────────────────────────────────
+@dataclass
+class Entity:
+    text: str
+    label: str
+    start: int
+    end: int
+    adaptation_type: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def entities_from_dicts(dicts: list[dict]) -> list["Entity"]:
+    """Reconstruct Entity objects from serialised dicts (stored in df)."""
+    return [Entity(**d) for d in (dicts or [])]
+
 
 def _fix_offsets(entity: dict, sentence: str) -> dict | None:
-    """Validate/repair character offsets by searching for the surface form."""
     text = entity.get("text", "")
     if not text:
         return None
-    start = entity.get("start", -1)
-    end = entity.get("end", -1)
-    if (
-        isinstance(start, int) and isinstance(end, int)
-        and 0 <= start < end <= len(sentence)
-        and sentence[start:end] == text
-    ):
+    start, end = entity.get("start", -1), entity.get("end", -1)
+    if (isinstance(start, int) and isinstance(end, int)
+            and 0 <= start < end <= len(sentence)
+            and sentence[start:end] == text):
         return entity
-    # Fallback: search
     idx = sentence.find(text)
     if idx < 0:
         return None
     return {**entity, "start": idx, "end": idx + len(text)}
 
 
-# ── Main processor ──────────────────────────────────────────
-
 class NERProcessor:
-    """LLM-based extractor of culturally-specific named entities."""
+    """LLM-based extractor of culturally-specific named entities.
 
-    def __init__(self, client: LLMClient):
+    Caching is handled by ``LLMClient`` (temp=0, hash-keyed).
+    NERProcessor itself is stateless — all results should be stored in df
+    columns (``ner_entities``) and passed to downstream components.
+    """
+
+    def __init__(self, client: LLMClient) -> None:
         self._client = client
-        # Per-instance memoisation of NER results (cheap cache)
-        self._cache: dict[str, list[Entity]] = {}
 
     def extract_entities(self, text: str) -> list[Entity]:
-        """Return all entities (from the cultural typology) in *text*."""
-        if text in self._cache:
-            return self._cache[text]
-        entities = self._call_llm(text)
-        self._cache[text] = entities
-        return entities
-
-    def extract_cultural_entities(self, text: str) -> list[Entity]:
-        """Alias — every entity returned is already cultural."""
-        return [
-            e for e in self.extract_entities(text)
-            if e.label in CULTURAL_TYPES
-        ]
-
-    def diff_entities(
-        self, sent_a: str, sent_b: str
-    ) -> tuple[list[Entity], list[Entity]]:
-        """Entities that differ between two sentences of a minimal pair."""
-        ents_a = self.extract_entities(sent_a)
-        ents_b = self.extract_entities(sent_b)
-        texts_b = {e.text for e in ents_b}
-        texts_a = {e.text for e in ents_a}
-        only_a = [e for e in ents_a if e.text not in texts_b]
-        only_b = [e for e in ents_b if e.text not in texts_a]
-        return only_a, only_b
-
-    def has_cultural_entities(self, text: str) -> bool:
-        return len(self.extract_cultural_entities(text)) > 0
-
-    # ── internal ─────────────────────────────────────────────
-
-    def _call_llm(self, sentence: str) -> list[Entity]:
-        prompt = NER_USER_TEMPLATE.format(sentence=sentence)
+        """Return all cultural entities for *text* (cached via LLMClient)."""
+        prompt = NER_USER_TEMPLATE.format(sentence=text)
         try:
-            raw = self._client.complete(
-                prompt, NER_SYSTEM_PROMPT, temperature=0.0
-            )
+            raw = self._client.complete(prompt, NER_SYSTEM_PROMPT, temperature=0.0)
             parsed = parse_json_response(raw)
-            return self._to_entities(parsed.get("entities", []), sentence)
+            return _to_entities(parsed.get("entities", []), text)
         except Exception as exc:
-            logger.warning("LLM NER failed for '%s…': %s", sentence[:50], exc)
+            logger.warning("LLM NER failed for '%s…': %s", text[:50], exc)
             return []
 
-    @staticmethod
-    def _to_entities(raw: list[dict], sentence: str) -> list[Entity]:
-        entities = []
-        for e in raw:
-            fixed = _fix_offsets(e, sentence)
-            if not fixed:
-                continue
-            label = fixed.get("label", "OTHER")
-            if label not in ADAPTATION_TYPES:
-                label = "OTHER"
-            entities.append(Entity(
-                text=fixed["text"],
-                label=label,
-                start=fixed["start"],
-                end=fixed["end"],
-                adaptation_type=ADAPTATION_TYPES[label],
-            ))
-        return entities
+    def extract_cultural_entities(self, text: str) -> list[Entity]:
+        """Every entity returned by extract_entities is already cultural."""
+        return self.extract_entities(text)
+
+    def diff_entities(
+        self, sent_a: str, sent_b: str,
+        ents_a: list[Entity] | None = None,
+        ents_b: list[Entity] | None = None,
+    ) -> tuple[list[Entity], list[Entity]]:
+        """Entities unique to each sentence (pre-computed lists accepted)."""
+        if ents_a is None:
+            ents_a = self.extract_entities(sent_a)
+        if ents_b is None:
+            ents_b = self.extract_entities(sent_b)
+        texts_b = {e.text for e in ents_b}
+        texts_a = {e.text for e in ents_a}
+        return (
+            [e for e in ents_a if e.text not in texts_b],
+            [e for e in ents_b if e.text not in texts_a],
+        )
+
+
+def _to_entities(raw: list[dict], sentence: str) -> list[Entity]:
+    entities = []
+    for e in raw:
+        fixed = _fix_offsets(e, sentence)
+        if not fixed:
+            continue
+        label = fixed.get("label", "OTHER")
+        if label not in ADAPTATION_TYPES:
+            label = "OTHER"
+        entities.append(Entity(
+            text=fixed["text"],
+            label=label,
+            start=fixed["start"],
+            end=fixed["end"],
+            adaptation_type=ADAPTATION_TYPES[label],
+        ))
+    return entities

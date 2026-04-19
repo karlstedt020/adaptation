@@ -36,12 +36,17 @@ class OpenRouterConfig:
     """OpenRouter API settings — user fills in key and model."""
     base_url: str = "https://openrouter.ai/api/v1"
     api_key: str = ""                                   # <-- SET YOUR KEY
-    model: str = "deepseek/deepseek-chat-v3.1"          # main translation/adaptation model (cheap)
-    ner_model: str = "google/gemini-2.0-flash-001"      # NER model (very cheap, good JSON following)
+    model: str = "deepseek/deepseek-chat-v3.1"          # main translation/adaptation model
+    ner_model: str = "google/gemini-2.0-flash-001"      # NER model (cheap, great at JSON)
     max_retries: int = 3
     timeout: int = 120
-    temperature: float = 0.7
-    n_variants: int = 3     # how many adaptation variants to generate
+    n_variants: int = 3          # adaptation variants per example
+
+    # ── Concurrency ──────────────────────────────────────────
+    # These limits apply globally across all threads to the same API.
+    max_workers: int = 4         # thread-pool size for parallel calls
+    rps: float = 4.0             # max LLM requests per second (all models combined)
+    translator_rps: float = 5.0  # max Google Translate requests per second
 
 
 @dataclass
@@ -59,7 +64,7 @@ class EvalConfig:
         "DeepPavlov/rubert-base-cased",
         "xlm-roberta-base",
     ])
-    n_runs: int = 3          # number of evaluation runs for aggregation
+    n_runs: int = 3
     slot_epochs: int = 5
     slot_batch_size: int = 32
     slot_lr: float = 5e-5
