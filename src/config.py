@@ -36,11 +36,18 @@ class OpenRouterConfig:
     """OpenRouter API settings — user fills in key and model."""
     base_url: str = "https://openrouter.ai/api/v1"
     api_key: str = ""                                   # <-- SET YOUR KEY
-    model: str = "deepseek/deepseek-chat-v3.1"          # main translation/adaptation model
+    model: str = "google/gemini-2.5-flash-lite"          # main translation/adaptation model
     ner_model: str = "google/gemini-2.0-flash-001"      # NER model (cheap, great at JSON)
     max_retries: int = 3
     timeout: int = 60
     n_variants: int = 3          # adaptation variants per example
+
+    # ── Ablation toggles (token-saving) ──────────────────────
+    # RAG = inject accumulated entity mappings into the system prompt.
+    # Judge = extra LLM call to pick the best of n_variants.
+    # When n_variants == 1 the judge is auto-disabled regardless.
+    use_rag: bool = True
+    use_judge: bool = True
 
     # ── Concurrency ──────────────────────────────────────────
     # These limits apply globally across all threads to the same API.
@@ -60,8 +67,18 @@ class EvalConfig:
         ("xlm-roberta-base",                        "mlm"),
         ("RefalMachine/RuadaptQwen2.5-3B-Instruct", "causal"),  # ≈ 6 GB in fp16
     ])
+    # Models for the EN-vs-RU "trained on source vs adapted" comparison.
+    # Multilingual so the same checkpoint can score both languages.
+    bias_models_cross: list = field(default_factory=lambda: [
+        ("bert-base-multilingual-cased", "mlm"),
+        ("xlm-roberta-base",             "mlm"),
+    ])
     slot_models: list = field(default_factory=lambda: [
         "DeepPavlov/rubert-base-cased",
+        "xlm-roberta-base",
+    ])
+    slot_models_cross: list = field(default_factory=lambda: [
+        "bert-base-multilingual-cased",
         "xlm-roberta-base",
     ])
     n_runs: int = 3

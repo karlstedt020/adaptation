@@ -75,10 +75,15 @@ Return ONLY this JSON:
 }}"""
 
 
-def _build_system(mapping_store: MappingStore) -> str:
-    return ANTHROPOLOGICAL_SYSTEM.format(
-        mappings_context=mapping_store.as_context_string()
-    )
+def _build_system(mapping_store: MappingStore, use_rag: bool = True) -> str:
+    """Render the anthropological system prompt.
+
+    When ``use_rag`` is False, the accumulated mapping-store context is
+    omitted entirely — saves prompt tokens (useful for smoke-checks /
+    quick ablations).
+    """
+    ctx = mapping_store.as_context_string() if use_rag else ""
+    return ANTHROPOLOGICAL_SYSTEM.format(mappings_context=ctx)
 
 
 def _parse_ner(val) -> list[dict]:
@@ -134,6 +139,8 @@ def _adapt_crows_row(
     mapping_store: MappingStore,
     row: dict,
     n_variants: int,
+    use_rag: bool = True,
+    use_judge: bool = True,
 ) -> dict:
     """Adapt one CrowS pair; use pre-computed NER entities from row."""
     ents_more = entities_from_dicts(_parse_ner(row.get("ner_more")))
@@ -146,16 +153,19 @@ def _adapt_crows_row(
         bias_type=row["bias_type"],
         diff_entities=_diff_str(diff_a, diff_b),
     )
-    system = _build_system(mapping_store)
+    system = _build_system(mapping_store, use_rag=use_rag)
     variants = client.complete_n(prompt, system, n=n_variants, temperature=0.9)
     parsed = [v for v in _parse_variants(variants) if _valid_crows(v)]
     if not parsed:
         return {"sent_more_ru": "", "sent_less_ru": "", "mappings": {}}
 
-    best = judge.select_best_crows(
-        row["sent_more"], row["sent_less"], row["bias_type"], parsed,
-    )
-    if isinstance(best.get("mappings"), dict):
+    if use_judge and len(parsed) > 1:
+        best = judge.select_best_crows(
+            row["sent_more"], row["sent_less"], row["bias_type"], parsed,
+        )
+    else:
+        best = parsed[0]
+    if use_rag and isinstance(best.get("mappings"), dict):
         mapping_store.add_batch(best["mappings"])
     return best
 
@@ -171,13 +181,25 @@ def adapt_crows_pairs(
     max_workers: int = 4,
     rps: float = 4.0,
     checkpoint: Checkpointer | None = None,
+    use_rag: bool = True,
+    use_judge: bool = True,
 ) -> pd.DataFrame:
-    """Adapt CrowS-Pairs through the full pipeline (parallel, with checkpoint)."""
+    """Adapt CrowS-Pairs through the full pipeline (parallel, with checkpoint).
+
+    Args:
+        use_rag:   include accumulated mappings in the system prompt.
+        use_judge: run LLM-as-a-Judge to pick the best variant; ignored when
+                   n_variants == 1 (judge is a no-op in that case anyway).
+    """
     out = _slice(df, limit)
+    effective_judge = use_judge and n_variants > 1
 
     done_ids, existing = (checkpoint.load() if checkpoint else (set(), None))
     pending = out[~out.index.isin(done_ids)].copy()
-    logger.info("Pipeline CrowS: %d to adapt, %d cached", len(pending), len(done_ids))
+    logger.info(
+        "Pipeline CrowS: %d to adapt, %d cached | rag=%s judge=%s n_var=%d",
+        len(pending), len(done_ids), use_rag, effective_judge, n_variants,
+    )
 
     if len(pending):
         rows = [r for _, r in pending.iterrows()]
@@ -186,6 +208,7 @@ def adapt_crows_pairs(
             try:
                 return _adapt_crows_row(
                     client, judge, mapping_store, row.to_dict(), n_variants,
+                    use_rag=use_rag, use_judge=effective_judge,
                 )
             except Exception as exc:
                 logger.warning("Pipeline CrowS failed idx %s: %s", row.name, exc)
@@ -194,7 +217,8 @@ def adapt_crows_pairs(
         results = parallel_apply(_call, rows, max_workers, rps, "Pipeline CrowS")
         pending["sent_more_ru"] = [r.get("sent_more_ru", "") for r in results]
         pending["sent_less_ru"] = [r.get("sent_less_ru", "") for r in results]
-        mapping_store.save()
+        if use_rag:
+            mapping_store.save()
 
     result = checkpoint.merge_and_save(existing, pending) if checkpoint else pending
     return result
@@ -208,6 +232,8 @@ def _adapt_snips_row(
     mapping_store: MappingStore,
     row: dict,
     n_variants: int,
+    use_rag: bool = True,
+    use_judge: bool = True,
 ) -> dict:
     """Adapt one SNIPS utterance using pre-computed NER entities."""
     ents = entities_from_dicts(_parse_ner(row.get("ner_entities")))
@@ -219,14 +245,17 @@ def _adapt_snips_row(
         entities=ents_str,
         slots=json.dumps(row.get("slots", []), ensure_ascii=False),
     )
-    system = _build_system(mapping_store)
+    system = _build_system(mapping_store, use_rag=use_rag)
     variants = client.complete_n(prompt, system, n=n_variants, temperature=0.9)
     parsed = [v for v in _parse_variants(variants) if _valid_snips(v)]
     if not parsed:
         return {"text_ru": "", "slots_ru": [], "mappings": {}}
 
-    best = judge.select_best_snips(row["text"], row["intent"], parsed)
-    if isinstance(best.get("mappings"), dict):
+    if use_judge and len(parsed) > 1:
+        best = judge.select_best_snips(row["text"], row["intent"], parsed)
+    else:
+        best = parsed[0]
+    if use_rag and isinstance(best.get("mappings"), dict):
         mapping_store.add_batch(best["mappings"])
     return best
 
@@ -241,13 +270,22 @@ def adapt_snips(
     max_workers: int = 4,
     rps: float = 4.0,
     checkpoint: Checkpointer | None = None,
+    use_rag: bool = True,
+    use_judge: bool = True,
 ) -> pd.DataFrame:
-    """Adapt SNIPS through the full pipeline (parallel, with checkpoint)."""
+    """Adapt SNIPS through the full pipeline (parallel, with checkpoint).
+
+    See ``adapt_crows_pairs`` for the meaning of ``use_rag`` / ``use_judge``.
+    """
     out = _slice(df, limit)
+    effective_judge = use_judge and n_variants > 1
 
     done_ids, existing = (checkpoint.load() if checkpoint else (set(), None))
     pending = out[~out.index.isin(done_ids)].copy()
-    logger.info("Pipeline SNIPS: %d to adapt, %d cached", len(pending), len(done_ids))
+    logger.info(
+        "Pipeline SNIPS: %d to adapt, %d cached | rag=%s judge=%s n_var=%d",
+        len(pending), len(done_ids), use_rag, effective_judge, n_variants,
+    )
 
     if len(pending):
         rows = [r for _, r in pending.iterrows()]
@@ -256,6 +294,7 @@ def adapt_snips(
             try:
                 return _adapt_snips_row(
                     client, judge, mapping_store, row.to_dict(), n_variants,
+                    use_rag=use_rag, use_judge=effective_judge,
                 )
             except Exception as exc:
                 logger.warning("Pipeline SNIPS failed idx %s: %s", row.name, exc)
@@ -264,7 +303,8 @@ def adapt_snips(
         results = parallel_apply(_call, rows, max_workers, rps, "Pipeline SNIPS")
         pending["text_ru"] = [r.get("text_ru", "") for r in results]
         pending["slots_ru"] = [r.get("slots_ru", []) for r in results]
-        mapping_store.save()
+        if use_rag:
+            mapping_store.save()
 
     result = checkpoint.merge_and_save(existing, pending) if checkpoint else pending
     return result
